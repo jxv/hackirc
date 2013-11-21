@@ -22,7 +22,7 @@ instance Ord ID where
 
 type Svr a = RWS SvrReader [SvrCmd] SvrState a
 
-data SvrReader = SvrReader -- needed for reader in `Svr' (RWS)
+data SvrReader = SvrReader -- dummy reader
   deriving (Show)
 
 data SvrCmd = 
@@ -41,7 +41,6 @@ data SvrState = SvrState
   }
   deriving (Show)
 
-idSvrCmd :: SvrCmd -> ID
 idSvrCmd cmd = case cmd of
   SvrOk      idn _     -> idn
   SvrError   idn _     -> idn
@@ -50,7 +49,6 @@ idSvrCmd cmd = case cmd of
   SvrJoin    idn _ _   -> idn
   SvrLeave   idn _ _   -> idn
 
-rawSvrCmd :: SvrCmd -> String
 rawSvrCmd cmd = (++ "\n") . unwords $ case cmd of
   SvrOk      _ mmsg                   -> ["OK", fromMaybe [] mmsg]
   SvrError   _ msg                    -> ["ERROR", msg]
@@ -58,10 +56,6 @@ rawSvrCmd cmd = (++ "\n") . unwords $ case cmd of
   SvrWispher _ sender content         -> ["WISPHER", sender, content]
   SvrJoin    _ room   user            -> ["JOIN", room, user]
   SvrLeave   _ room   user            -> ["LEAVE", room, user]
-
-emptySvrState = SvrState M.empty M.empty M.empty
-
-execSvr s = execRWS s SvrReader
 
 doCmd idn str = do
   let raw = words str
@@ -155,12 +149,8 @@ inRoom idn room s = do
       then s sidns
       else tell [SvrError idn "Not in room"]
 
---
-
 doCommandRaw idn mvst str ret = do
-   cmds <- modifyMVar mvst $ \st -> do
-      (st', cmds) <- return $ execSvr (doCmd idn str) st
-      return (st', cmds)
+   cmds <- modifyMVar mvst $ \st -> return $ execRWS (doCmd idn str) SvrReader st
    return (ret, cmds)
 
 doCommand idn mvst = do
@@ -185,6 +175,6 @@ listener sock rawidn mvst = do
 
 main = withSocketsDo $ do
   sock <- listenOn $ PortNumber 1801
-  mvst <- newMVar emptySvrState
+  mvst <- newMVar $ SvrState M.empty M.empty M.empty
   listener sock 0 mvst
 
