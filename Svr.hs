@@ -165,13 +165,15 @@ handleCln (idn, hndl) mvmidn mvstate = do
     let send = hPutStr hndl (rawSvrCmd cmd) >> return True
     let errHndlr _ = doCommand mvstate idn "LOGOUT" >>= cmdsToChan >> return False
     again <- send `catchIOError` errHndlr
-    when again loop
+    if again
+      then loop
+      else modifyMVar mvmidn $ \midn -> return (M.delete idn midn, ())
 
   fix $ \loop -> do
     let cmdToChan midn cmd = F.mapM_ ((flip writeChan) cmd) $ M.lookup (idSvrCmd cmd) midn
     let cmdsToChan cmds = readMVar mvmidn >>= \midn -> F.forM_ cmds $ cmdToChan midn
     let recv = hGetLine hndl >>= doCommand mvstate idn >>= cmdsToChan >> return True
-    let errHndlr _ = doCommand mvstate idn "LOGGOUT" >>= cmdsToChan >> killThread sendThId >> return False
+    let errHndlr _ = doCommand mvstate idn "LOGGOUT" >>= cmdsToChan >> return False
     again <- recv `catchIOError` errHndlr
     if again
       then loop
