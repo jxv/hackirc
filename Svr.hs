@@ -6,6 +6,7 @@ import Control.Monad.Fix
 import Control.Monad.Trans
 import Control.Monad.Trans.RWS
 import Data.Maybe
+import Data.Char
 import qualified Data.Foldable as F
 import qualified Data.Set as S
 import qualified Data.Map as M
@@ -13,8 +14,11 @@ import System.IO
 import System.IO.Error
 import Network
 
-data ID = ID { getID :: Integer }
-  deriving (Show, Eq, Ord)
+data ID = ID { getID :: Integer, getHandle :: Handle }
+  deriving (Show, Eq)
+
+instance Ord ID where
+  compare a b = compare (getID a) (getID b)
 
 type Svr a = RWS SvrReader [SvrCmd] SvrState a
 
@@ -62,8 +66,9 @@ execSvr s = execRWS s SvrReader
 doCmd idn str = do
   let raw = words str
   let (rcmd:rargs) = raw
+  let rcmd' = map toUpper rcmd
   let len = length rargs
-  unless (null raw) $ action raw len rcmd rargs
+  unless (null raw) $ action raw len rcmd' rargs
   where
     action raw len rcmd rargs
       | null raw = tell [SvrError idn "No Input"]
@@ -150,43 +155,34 @@ inRoom idn room s = do
 
 --
 
-doCommand mvstate idn rawstr = modifyMVar mvstate $ \state ->
-  return $ execSvr (doCmd idn rawstr) state
+doCommandRaw idn mvst str ret = do
+   cmds <- modifyMVar mvst $ \st -> do
+      (st', cmds) <- return $ execSvr (doCmd idn str) st
+      return (st', cmds)
+   return (ret, cmds)
 
-handleCln (idn, hndl) mvmidn mvstate = do
-  chcmd <- newChan
-  
-  modifyMVar mvmidn $ \midn -> return (M.insert idn chcmd midn, ())
+doCommand idn mvst = do
+  let recv = hGetLine (getHandle idn) >>= \line -> doCommandRaw idn mvst line True
+  let errHndlr e = doCommandRaw idn mvst "LOGOUT" False
+  recv `catchIOError` errHndlr
 
-  sendThId <- forkIO $ fix $ \loop -> do
-    let cmdToChan midn cmd = F.mapM_ ((flip writeChan) cmd) $ M.lookup (idSvrCmd cmd) midn
-    let cmdsToChan cmds = readMVar mvmidn >>= \midn -> F.forM_ cmds $ cmdToChan midn
-    cmd <- readChan chcmd
-    let send = hPutStr hndl (rawSvrCmd cmd) >> return True
-    let errHndlr _ = doCommand mvstate idn "LOGOUT" >>= cmdsToChan >> return False
-    again <- send `catchIOError` errHndlr
-    if again
-      then loop
-      else modifyMVar mvmidn $ \midn -> return (M.delete idn midn, ())
+sendCommands cmds = do
+  let send c = hPutStr (getHandle $ idSvrCmd c) $ rawSvrCmd c
+  let errHndlr e = return ()
+  F.forM_ cmds $ \c -> send c `catchIOError` errHndlr
 
-  fix $ \loop -> do
-    let cmdToChan midn cmd = F.mapM_ ((flip writeChan) cmd) $ M.lookup (idSvrCmd cmd) midn
-    let cmdsToChan cmds = readMVar mvmidn >>= \midn -> F.forM_ cmds $ cmdToChan midn
-    let recv = hGetLine hndl >>= doCommand mvstate idn >>= cmdsToChan >> return True
-    let errHndlr _ = doCommand mvstate idn "LOGGOUT" >>= cmdsToChan >> return False
-    again <- recv `catchIOError` errHndlr
-    if again
-      then loop
-      else modifyMVar mvmidn $ \midn -> return (M.delete idn midn, ())
+handleCln idn mvst = do
+  (again, cmds) <- doCommand idn mvst
+  sendCommands cmds
+  when again $ handleCln idn mvst
 
-listener sock rawidn mvmidn mvstate = do
+listener sock rawidn mvst = do
   (hndl,_,_) <- accept sock
-  handleCln (ID rawidn, hndl) mvmidn mvstate
-  listener sock (rawidn + 1) mvmidn mvstate
+  void $ forkIO $ handleCln (ID rawidn hndl) mvst
+  listener sock (rawidn+1) mvst
 
-main = do
+main = withSocketsDo $ do
   sock <- listenOn $ PortNumber 1801
-  mvmidn  <- newMVar $ M.empty
-  mvstate <- newMVar emptySvrState
-  listener sock 0 mvmidn mvstate
+  mvst <- newMVar emptySvrState
+  listener sock 0 mvst
 
