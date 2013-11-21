@@ -111,7 +111,9 @@ join' idn room = do
     tell [SvrOk idn $ Just "Joined room"] 
     case (M.lookup room rooms) of
       Nothing    -> put $ svrstate $ M.insert room (S.singleton idn) rooms
-      Just sidns -> put $ svrstate $ M.adjust (S.insert idn) room rooms
+      Just sidns -> do
+        tell [SvrJoin i room name | i <- S.elems sidns]
+        put $ svrstate $ M.adjust (S.insert idn) room rooms
 
 leave idn room = do
   logged idn $ \name -> do
