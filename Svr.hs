@@ -1,3 +1,5 @@
+module Main where
+
 import GHC.IO.Handle
 import Control.Concurrent
 import Control.Concurrent.MVar
