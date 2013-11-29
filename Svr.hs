@@ -16,11 +16,11 @@ import System.IO
 import System.IO.Error
 import Network
 
-data ID = ID { getID :: Integer, getHandle :: Handle }
+data ID = ID { getHandle :: Handle }
   deriving (Show, Eq)
 
 instance Ord ID where
-  compare a b = compare (getID a) (getID b)
+  compare a b = let f = show . getHandle in compare (f a) (f b)
 
 type Svr a = RWS SvrReader [SvrCmd] SvrState a
 
@@ -43,6 +43,7 @@ data SvrState = SvrState
   }
   deriving (Show)
 
+idSvrCmd :: SvrCmd -> ID
 idSvrCmd cmd = case cmd of
   SvrOk      idn _     -> idn
   SvrError   idn _     -> idn
@@ -51,6 +52,7 @@ idSvrCmd cmd = case cmd of
   SvrJoin    idn _ _   -> idn
   SvrLeave   idn _ _   -> idn
 
+rawSvrCmd :: SvrCmd -> String
 rawSvrCmd cmd = (++ "\n") . unwords $ case cmd of
   SvrOk      _ mmsg                   -> ["OK", fromMaybe [] mmsg]
   SvrError   _ msg                    -> ["ERROR", msg]
@@ -59,6 +61,7 @@ rawSvrCmd cmd = (++ "\n") . unwords $ case cmd of
   SvrJoin    _ room   user            -> ["JOIN", room, user]
   SvrLeave   _ room   user            -> ["LEAVE", room, user]
 
+doCmd :: ID -> String -> Svr ()
 doCmd idn str = do
   let raw = words str
   let (rcmd:rargs) = raw
@@ -76,6 +79,7 @@ doCmd idn str = do
       | rcmd == "WISPHER" && len >= 1 = wispher idn (head rargs) $ unwords $ drop 1 rargs
       | otherwise = tell [SvrError idn "Invalid Input"]
 
+login :: ID -> String -> Svr ()
 login idn name = do
   (SvrState idns names rooms) <- get
   case (M.lookup idn idns) of
@@ -89,6 +93,7 @@ login idn name = do
           put $ SvrState idns' names' rooms
           tell [SvrOk idn $ Just "Welcome"]
 
+logout :: ID -> Svr ()
 logout idn = do
   logged idn $ \name -> do
     (SvrState idns names rooms) <- get
@@ -100,6 +105,7 @@ logout idn = do
     let names'' = M.delete name names'
     put (SvrState idns'' names'' rooms')
 
+join' :: ID -> String -> Svr ()
 join' idn room = do
   logged idn $ \name -> do
     (SvrState idns names rooms) <- get
@@ -111,6 +117,7 @@ join' idn room = do
         tell [SvrJoin i room name | i <- S.elems sidns]
         put $ svrstate $ M.adjust (S.insert idn) room rooms
 
+leave :: ID -> String -> Svr ()
 leave idn room = do
   logged idn $ \name -> do
     inRoom idn room $ \sidns -> do
@@ -122,6 +129,7 @@ leave idn room = do
       let rooms'' = M.filter (not . S.null) rooms'
       put (SvrState idns names rooms'')
       
+say :: ID -> String -> String -> Svr ()
 say idn room content = do
   logged idn $ \sender -> do
     inRoom idn room $ \sidns -> do
@@ -129,6 +137,7 @@ say idn room content = do
       tell [SvrMessage i room sender content | i <- toidns]
       tell [SvrOk idn $ Just "Sent message"]
 
+wispher :: ID -> String -> String -> Svr ()
 wispher idn name content = do
   logged idn $ \sender -> do
     (SvrState _ names _) <- get
@@ -137,12 +146,14 @@ wispher idn name content = do
       Nothing    -> tell [SvrError idn "No such user"]
       Just recip -> tell [SvrWispher recip sender content]
 
+logged :: ID -> (String -> Svr ()) -> Svr ()
 logged idn s = do
   (SvrState idns _ _) <- get
   case (M.lookup idn idns) of
     Nothing   -> tell [SvrError idn "Not logged in"]
     Just name -> s name
 
+inRoom :: ID -> String -> (S.Set ID -> Svr ()) -> Svr()
 inRoom idn room s = do
   (SvrState _ _ rooms) <- get
   case (M.lookup room rooms) of
@@ -151,32 +162,38 @@ inRoom idn room s = do
       then s sidns
       else tell [SvrError idn "Not in room"]
 
+doCommandRaw :: ID -> MVar SvrState -> String -> Bool -> IO (Bool, [SvrCmd])
 doCommandRaw idn mvst str ret = do
    cmds <- modifyMVar mvst $ \st -> return $ execRWS (doCmd idn str) SvrReader st
    return (ret, cmds)
 
+doCommand :: ID -> MVar SvrState -> IO (Bool, [SvrCmd])
 doCommand idn mvst = do
   let recv = hGetLine (getHandle idn) >>= \line -> doCommandRaw idn mvst line True
   let errHndlr e = doCommandRaw idn mvst "LOGOUT" False
   recv `catchIOError` errHndlr
 
+sendCommands :: [SvrCmd] -> IO ()
 sendCommands cmds = do
   let send c = hPutStr (getHandle $ idSvrCmd c) $ rawSvrCmd c
   let errHndlr e = return ()
   F.forM_ cmds $ \c -> send c `catchIOError` errHndlr
 
+handleCln :: ID -> MVar SvrState -> IO ()
 handleCln idn mvst = do
   (again, cmds) <- doCommand idn mvst
   sendCommands cmds
   when again $ handleCln idn mvst
 
-listener sock rawidn mvst = do
+listener :: Socket -> MVar SvrState -> IO ()
+listener sock mvst = do
   (hndl,_,_) <- accept sock
-  void $ forkIO $ handleCln (ID rawidn hndl) mvst
-  listener sock (rawidn+1) mvst
+  void $ forkIO $ handleCln (ID hndl) mvst
+  listener sock mvst
 
+main :: IO ()
 main = withSocketsDo $ do
   sock <- listenOn $ PortNumber 1801
   mvst <- newMVar $ SvrState M.empty M.empty M.empty
-  listener sock 0 mvst
+  listener sock mvst
 
